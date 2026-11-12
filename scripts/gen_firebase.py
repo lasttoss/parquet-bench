@@ -30,6 +30,10 @@ SCHEMA = pa.schema([
     ("stream_id", STR), ("platform", STR),
     ("user_properties", pa.list_(pa.struct([("key", STR), ("value", VALUE_T)]))),
     ("event_params", pa.list_(PARAM_T)),
+    ("items", pa.list_(pa.struct([
+        ("item_id", STR), ("item_name", STR), ("item_brand", STR), ("item_variant", STR),
+        ("item_category", STR), ("price", F64), ("quantity", INT64), ("currency", STR),
+    ]))),
 ])
 
 EVENTS = ["level_start", "level_end", "purchase", "screen_view", "session_start", "ad_impression"]
@@ -49,10 +53,21 @@ def make_params(kind, key):
     return (key, (None, None, None, float(NRNG.random() * 100)))
 
 
-def make_batch(n):
+def make_items(k):
+    if k <= 0:
+        return []
+    return [(f"item_{RNG.randint(1, 500)}", f"Pack {RNG.randint(1, 99)}",
+             ["Nintendo", "Sony", "Tencent", "VNG"][RNG.randint(0, 3)],
+             ["basic", "plus", "pro"][RNG.randint(0, 2)],
+             ["iap", "bundle", "cosmetic"][RNG.randint(0, 2)],
+             round(RNG.random() * 50, 2), int(NRNG.integers(1, 4)), "USD")
+            for _ in range(k)]
+
+
+def make_batch(n, pmin=8, pmax=14, items=0):
     rows = []
     for _ in range(n):
-        k = int(NRNG.integers(8, len(PARAMS) + 1))
+        k = int(NRNG.integers(pmin, min(pmax, len(PARAMS)) + 1))
         chosen = RNG.sample(PARAMS, k)
         params = [make_params(kind, key) for key, kind in chosen]
         props = [make_params("str", "first_open_time"), make_params("str", "language")]
@@ -75,6 +90,7 @@ def make_batch(n):
             "platform": ["ANDROID", "IOS"][int(NRNG.integers(0, 2))],
             "user_properties": props,
             "event_params": params,
+            "items": make_items(items),
         })
     return pa.Table.from_pylist(rows, schema=SCHEMA)
 
@@ -84,12 +100,15 @@ def main():
     ap.add_argument("--rows", type=int, default=5_000_000)
     ap.add_argument("--out", default="/data/fb/fb.parquet")
     ap.add_argument("--batch", type=int, default=50_000)
+    ap.add_argument("--param-min", type=int, default=8)
+    ap.add_argument("--param-max", type=int, default=14)
+    ap.add_argument("--items", type=int, default=0)
     a = ap.parse_args()
     os.makedirs(os.path.dirname(a.out), exist_ok=True)
     t0 = time.time(); done = 0; w = None
     while done < a.rows:
         n = min(a.batch, a.rows - done)
-        t = make_batch(n)
+        t = make_batch(n, a.param_min, a.param_max, a.items)
         if w is None:
             w = pq.ParquetWriter(a.out, t.schema, compression="zstd")
         w.write_table(t, row_group_size=n)

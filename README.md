@@ -212,6 +212,37 @@ every column as `Nullable(...)` from the parquet metadata, which is what BigQuer
 exports produce; those columns are slower and bigger than their non-nullable
 equivalents, so a `CREATE TABLE` with explicit non-nullable types is worth the effort.
 
+### There is no public BigQuery-export parquet to download
+
+Searched before generating anything, so the field list is not invented:
+
+- Hugging Face has exactly one GA4 export (`balakrishnatrt1/ga4-dataset-from-BQ-trainingset-2months`).
+  Its parquet conversion is **flattened** (`event_params_key`, `event_params_string_value`, ...)
+  and mistyped (`user_pseudo_id` as double), so it does not exercise nested parsing at all.
+- GitHub code search for `event_params extension:parquet` returns 0 files.
+- Google's `firebase-public-project.analytics_153293282` is public but only readable through
+  BigQuery with credentials.
+
+So `scripts/gen_firebase.py` follows the official GA4 export schema
+(support.google.com/analytics/answer/7029846): `event_params`, `user_properties` and `items` as
+repeated RECORDs, `privacy_info`/`user_ltv`/`device`/`geo`/`traffic_source` as RECORDs.
+Row **values** are synthetic; the **shape** is the documented one.
+
+Measured bytes per row at three realistic widths (zstd):
+
+| variant | params per event | items per event | parquet | bytes/row |
+|---|---|---:|---:|---:|
+| minimal | 8-9 | 0 | 26 MB for 300k | 86 |
+| typical | 10-14 | 2 | 108 MB for 1M | 108 |
+| heavy | 14 | 5 | 37 MB for 300k | 124 |
+
+Loading the typical variant, 1M rows, single INSERT: **3.5 s, 285,000 rows/s, 2.6 cores,
+9 cpu-seconds, 3,724 MB peak heap**, and **222 MiB on disk (2.06x the parquet)**.
+
+Caveat worth stating plainly: the generator writes short strings (`value_1234`, `model_17`).
+Real GA4 rows carry URLs, screen names and item names, so treat 86-124 B/row as a **lower
+band**; real exports often land at 120-200 B/row. One day of real data settles it.
+
 ### Where a 30-minute load actually goes
 
 Parsing the JSON form of these records, not inserting them, is usually the real cost.
