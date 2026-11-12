@@ -112,6 +112,34 @@ Throughput scales with concurrent INSERT statements, not with the size of one
 statement, so a backfill is limited by how many loader streams the disk and CPU can
 feed — not by ClickHouse's single-insert rate.
 
+## Reading straight from GCS (no download)
+
+Both functions are present in 24.8 and were verified against a public GCS object
+(`cloud-samples-data/bigquery/us-states/us-states.parquet`, 50 rows):
+
+```sql
+-- native GCS function
+SELECT count() FROM gcs('https://storage.googleapis.com/cloud-samples-data/bigquery/us-states/us-states.parquet', NOSIGN, 'Parquet');
+
+-- GCS through its S3-compatible endpoint (works with wildcards and s3Cluster)
+INSERT INTO bench.us_states (name, abbreviation)
+SELECT name, abbreviation
+FROM s3('https://storage.googleapis.com/cloud-samples-data/bigquery/us-states/*.parquet', NOSIGN, 'Parquet');
+```
+
+Notes taken from actually running this:
+
+- `SELECT *` inside `INSERT … SELECT` from a parquet URL raised a syntax error on
+  this build; listing the columns explicitly works.
+- Private buckets need **HMAC interoperability keys** (GCS console → Settings →
+  Interoperability), not a service-account JSON file.
+- `NOSIGN` works for public objects, which is enough for a smoke test.
+- Wildcards over a prefix are what makes this parallel: ClickHouse reads objects
+  concurrently and merges the parsed blocks.
+- Egress from GCS is billed and is usually the real limit; running ClickHouse in the
+  same region removes that cost. Streaming was verified for correctness here, not
+  for throughput: the public test object is ~1 KB, so no MB/s number is claimed.
+
 ## Findings
 
 1. **Server-side Parquet is only ~5% faster than an Arrow insert** (1.62M vs 1.54M
