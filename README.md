@@ -56,6 +56,26 @@ Separately measured, because it is too slow to finish in the same loop:
 Data integrity check: server-side `file()` and Arrow insert produce identical
 `count()`, `sum(session_ms)`, `sum(revenue_cents)` and `uniqExact(user_id)`.
 
+## Scale test: 50M rows (the number that matters in practice)
+
+Same table, same machine, one 1.18 GB parquet file (10× the rows). Throughput is
+flat, and memory with chunked writes is flat too — measured peak of the container,
+not self-reported:
+
+| approach | rows | seconds | rows/s | peak container RAM |
+|---|---:|---:|---:|---:|
+| `server file()` | 50,000,000 | 30.7 | 1,630,056 | — (server side) |
+| `insert_arrow`, 200k batches | 50,000,000 | 34.6 | 1,446,930 | **1,096 MB** |
+| `insert_df` (pandas), 200k batches | 50,000,000 | 105.6 | 473,407 | **1,113 MB** |
+| `insert_df`, whole file in one DataFrame (5M rows) | 5,000,000 | 9.1 | 548,431 | 1,049 MB |
+
+Memory does not grow with the file when the reader is chunked: 1.1 GB at both 5M and
+50M rows. It grows with how much a script holds at once — the unchunked 5M run
+already costs 1.05 GB (~210 bytes/row in pandas), so a 350M-row backfill loaded in
+one DataFrame would need roughly 73 GB. That matches the "72 GB of RAM" experience
+people report; it is a property of the script holding everything, not of Parquet and
+not of ClickHouse.
+
 ## Findings
 
 1. **Server-side Parquet is only ~5% faster than an Arrow insert** (1.62M vs 1.54M

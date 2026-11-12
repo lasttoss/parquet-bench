@@ -13,15 +13,36 @@ import pyarrow.parquet as pq
 HOST = "clickhouse"
 
 
+def peak_mb():
+    """Peak memory of this container, measured by the kernel (cgroup v2), not by self-reported RSS."""
+    for path in ("/sys/fs/cgroup/memory.peak", "/sys/fs/cgroup/memory/memory.max_usage_in_bytes"):
+        try:
+            v = int(open(path).read().split()[0])
+            return round(v / 1e6)
+        except Exception:
+            continue
+    return None
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mode", choices=["arrow", "pandas", "naive"], required=True)
+    ap.add_argument("--mode", choices=["arrow", "pandas", "naive", "pandas_full"], required=True)
     ap.add_argument("--rows", type=int, default=5_000_000)
     ap.add_argument("--chunk", type=int, default=200_000)
     ap.add_argument("--file", default="/data/big.parquet")
     a = ap.parse_args()
 
     client = clickhouse_connect.get_client(host=HOST, port=8123, compress=False)
+    if a.mode == "pandas_full":
+        # what a script does when nobody told it to chunk: the whole file as one DataFrame
+        import pandas as pd, pyarrow.parquet as _pq
+        t0 = time.perf_counter()
+        df = _pq.read_table(a.file).to_pandas()
+        client.insert_df("bench.events", df)
+        el = time.perf_counter() - t0
+        print(json.dumps({"mode": a.mode, "rows": len(df), "seconds": round(el, 3),
+                          "rows_per_s": round(len(df) / el), "peak_mb": peak_mb()}))
+        return
     # a directory means "many small files": the script opens them one by one, which is
     # exactly the case where server-side file() and a script stop behaving the same.
     import os, glob
@@ -58,7 +79,7 @@ def main():
         todo -= batch.num_rows
     elapsed = time.perf_counter() - t0
     print(json.dumps({"mode": a.mode, "rows": inserted, "seconds": round(elapsed, 3),
-                      "rows_per_s": round(inserted / elapsed)}))
+                      "rows_per_s": round(inserted / elapsed), "peak_mb": peak_mb()}))
 
 
 if __name__ == "__main__":
