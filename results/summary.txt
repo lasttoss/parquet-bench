@@ -1,0 +1,8 @@
+approach                    median s       rows/s    MB/s  vs best  runs
+server_parquet_glob10           2.99    1,671,123    76.9     1.01x  3
+server_parquet_one              3.10    1,615,509    74.3     1.04x  3
+server_parquet_glob200          3.22    1,552,313    71.4     1.09x  3
+py_arrow                        3.25    1,540,832    70.9     1.09x  3
+client_stdin_parquet            3.30    1,513,775    69.6     1.11x  3
+py_arrow_manyfiles              3.50    1,428,571    65.7     1.18x  3
+py_pandas                      10.47      477,464    22.0     3.53x  3

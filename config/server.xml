@@ -1,0 +1,5 @@
+<clickhouse>
+    <!-- keep defaults honest: no tuning tricks, so the numbers are what a plain install gives -->
+    <max_server_memory_usage_to_ram_ratio>0.6</max_server_memory_usage_to_ram_ratio>
+    <logger><level>warning</level></logger>
+</clickhouse>

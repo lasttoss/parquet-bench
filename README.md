@@ -1,0 +1,113 @@
+# parquet-bench
+
+Does reading Parquet on the ClickHouse server actually beat a Python script? This
+repo measures it instead of repeating the claim.
+
+Same dataset, same table, same machine. Each path truncates the table first, and
+the row count is verified afterwards, so a failed insert cannot be reported as a
+fast one. Every number below is the median of 3 runs.
+
+## Dataset
+
+5,000,000 event rows, 13 columns, zstd parquet, ~266 MB total (46 bytes/row after
+compression, ~106 bytes/row before):
+
+```
+event_id UInt64 · ts DateTime64(3) · user_id UInt64 · session_id UInt64
+game_id, event, platform, country  LowCardinality(String)  (dictionary-encoded in parquet)
+level UInt16 · session_ms UInt32 · revenue_cents UInt64 · is_payer UInt8 · props String
+```
+
+Three layouts of the *same* rows, so file count is the only variable:
+
+| layout | files | file size |
+|---|---|---|
+| `big.parquet` | 1 | 133 MB |
+| `parts/` | 10 | ~13 MB each |
+| `many/parts/` | 200 | ~0.7 MB each |
+
+## Machine and versions
+
+```
+16 vCPU · 22 GB RAM · local NVMe (no network storage)
+ClickHouse 24.8.14.39, single node, default settings (only max_server_memory_usage_to_ram_ratio=0.6)
+Python 3.12 · pyarrow 17.0 · clickhouse-connect 0.8.6 · pandas 2.2.3
+Server, client and script all on the same docker network: no port forwarding, no network hop
+```
+
+## Results (median of 3, 5M rows)
+
+| approach | what runs where | seconds | rows/s | MB/s | vs best |
+|---|---|---:|---:|---:|---:|
+| `server_parquet_glob10` | `INSERT … SELECT * FROM file('parts/*.parquet')` | 2.99 | 1,671,123 | 76.9 | 1.01x |
+| `server_parquet_one` | `INSERT … SELECT * FROM file('big.parquet')` | 3.10 | 1,615,509 | 74.3 | 1.04x |
+| `server_parquet_glob200` | same, 200 files | 3.22 | 1,552,313 | 71.4 | 1.09x |
+| `py_arrow` | script → `clickhouse-connect.insert_arrow`, 200k-row batches | 3.25 | 1,540,832 | 70.9 | 1.09x |
+| `client_stdin_parquet` | `clickhouse-client … FORMAT Parquet < big.parquet` | 3.30 | 1,513,775 | 69.6 | 1.11x |
+| `py_arrow_manyfiles` | script, opening 200 small files one by one | 3.50 | 1,428,571 | 65.7 | 1.18x |
+| `py_pandas` | script → `insert_df`, 200k-row batches | 10.47 | 477,464 | 22.0 | 3.53x |
+
+Separately measured, because it is too slow to finish in the same loop:
+
+| approach | rows | seconds | rows/s |
+|---|---:|---:|---:|
+| `py_naive` — Python objects, 10k rows per INSERT | 500,000 | 5.56 | 90,016 |
+
+Data integrity check: server-side `file()` and Arrow insert produce identical
+`count()`, `sum(session_ms)`, `sum(revenue_cents)` and `uniqExact(user_id)`.
+
+## Findings
+
+1. **Server-side Parquet is only ~5% faster than an Arrow insert** (1.62M vs 1.54M
+   rows/s). The "read parquet on the server and it is 10x faster" claim does not
+   survive measurement when the client is already sending Arrow batches over
+   HTTP on the same host.
+2. **The gap that is real is pandas.** `insert_df` is 3.5x slower than
+   `insert_arrow` (0.48M vs 1.54M rows/s), on identical data and identical
+   batches. The conversion to Python objects costs more than the insert itself.
+3. **Row-by-row inserts are ~18x slower** (90k rows/s). At that rate 5M rows takes
+   ~55s instead of ~3s. This is extrapolation from a measured 500k rows, not a
+   measured 5M run.
+4. **File count did not matter on local NVMe.** 1 file, 10 files and 200 files all
+   land within 8% of each other, because the server reads files in parallel across
+   cores. The small-file penalty people warn about is a property of object storage
+   (one GET per object), which this repo does **not** measure — no S3/GCS
+   credentials were used.
+5. **Streaming parquet through the client is not slower here** (1.51M rows/s),
+   because client and server run on the same host. Over a real network the
+   compression and the transfer are paid twice, once by the client and once by
+   the server.
+
+## What this does not prove
+
+- Single node, no replication, no `ReplicatedMergeTree`, no materialized views.
+- 13 flat columns with no nested/array types; nested structures change parsing cost.
+- No concurrent queries or writes while loading; a busy cluster behaves differently.
+- Local NVMe only. S3/GCS reads, remote object storage and network latency are untested.
+- Python paths use HTTP (`clickhouse-connect`), not the native TCP port or `clickhouse-local`.
+- One insert per approach per run: numbers describe throughput for a single writer,
+  not steady-state compaction behaviour.
+
+## Reproduce
+
+```bash
+docker compose up -d clickhouse
+docker compose run --rm -T bench python /app/scripts/gen_parquet.py --rows 5000000 --parts 10 --out /data
+docker compose run --rm -T bench python /app/scripts/gen_parquet.py --rows 5000000 --parts 200 --out /data/many
+docker compose exec -T clickhouse clickhouse-client --multiquery < bench/schema.sql
+RUNS=3 ./bench/bench.sh          # writes results/runs.csv and prints results/summary.txt
+```
+
+## Layout
+
+```
+docker-compose.yml   clickhouse + bench python image, no host ports (so port forwarding is never measured)
+Dockerfile.bench     pyarrow + clickhouse-connect + pandas
+bench/schema.sql     the target table
+bench/bench_py.py    script-side paths: arrow, pandas, naive
+bench/bench.sh       truncates, times, verifies row count, records
+bench/summarize.py   median per approach + ratio against the fastest
+results/             summary.txt kept; raw csv is gitignored and regenerated
+```
+
+MIT.

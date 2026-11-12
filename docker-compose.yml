@@ -1,0 +1,41 @@
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    container_name: pb-clickhouse
+    # no host ports on purpose: every client lives on the compose network, so the
+    # benchmark never measures docker port forwarding.
+    ulimits:
+      nofile: {soft: 262144, hard: 262144}
+    volumes:
+      # file() only reads inside user_files, so the dataset is mounted there
+      - ./data:/var/lib/clickhouse/user_files/bench:ro
+      - ./config/server.xml:/etc/clickhouse-server/config.d/bench.xml:ro
+      - chdata:/var/lib/clickhouse
+    environment:
+      CLICKHOUSE_SKIP_USER_SETUP: "1"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8123/ping"]
+      interval: 3s
+      timeout: 2s
+      retries: 40
+
+  bench:
+    build:
+      context: .
+      dockerfile: Dockerfile.bench
+    image: parquet-bench-py:latest
+    container_name: pb-bench
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    volumes:
+      - ./data:/data          # read-write here: the generator writes the dataset
+      - ./bench:/app/bench:ro
+      - ./scripts:/app/scripts:ro
+      - ./results:/app/results
+    environment:
+      CH_HOST: clickhouse
+    # no default command: every run is `docker compose run --rm bench ...`
+
+volumes:
+  chdata:
