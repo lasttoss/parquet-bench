@@ -99,6 +99,19 @@ while 10,000 inserts of one row each ran at 475 rows/s.
 Relevant defaults measured on this build: `max_insert_block_size=1,048,449`,
 `max_partitions_per_insert_block=100`, `async_insert=0`.
 
+## Parallel load
+
+4 files × 5M rows, same table, on this 16-vCPU box:
+
+| mode | seconds | rows/s | speedup |
+|---|---:|---:|---:|
+| one INSERT after another | 12.48 | 1,603,191 | 1.00x |
+| 4 INSERTs concurrently | 4.34 | 4,603,873 | 2.87x |
+
+Throughput scales with concurrent INSERT statements, not with the size of one
+statement, so a backfill is limited by how many loader streams the disk and CPU can
+feed — not by ClickHouse's single-insert rate.
+
 ## Findings
 
 1. **Server-side Parquet is only ~5% faster than an Arrow insert** (1.62M vs 1.54M
