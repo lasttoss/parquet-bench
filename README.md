@@ -191,6 +191,36 @@ replication, background merges still running afterwards (`system.parts` showed 3
 active parts on the taxi table), and an in-memory filesystem or faster disk would move
 these numbers more than any ClickHouse setting here.
 
+## Nested schema (Firebase / GA4 shape)
+
+`scripts/gen_firebase.py` builds the shape a BigQuery `EXPORT DATA` of
+`analytics_<id>.events_*` produces: `event_params` as a repeated record of
+key/value(struct of string/int/float/double), plus `user_properties`, and
+`device`/`geo`/`traffic_source` structs, 8-14 params per event. Measured 96 bytes per
+row after zstd — a "1 KB record" in JSON compresses to roughly a tenth of that in
+parquet, because the keys repeat.
+
+| layout | rows | parquet | streams | ORDER BY | seconds | rows/s | MB/s |
+|---|---:|---:|---:|---|---:|---:|---:|
+| nested | 2,000,000 | 192 MB | 1 | `tuple()` | 3.88 | 515,000 | 49 |
+| nested | 2,000,000 | 192 MB | 4 | `tuple()` | 1.76 | 1,136,000 | 109 |
+| nested | 2,000,000 | 192 MB | 4 | `(event_name, event_timestamp)` | 2.75 | 727,000 | 70 |
+
+Nested parsing costs roughly 1.5x against a flat schema at the same byte count, and
+the table on disk is 1.86x the parquet size (357 MiB vs 192 MB). ClickHouse inferred
+every column as `Nullable(...)` from the parquet metadata, which is what BigQuery
+exports produce; those columns are slower and bigger than their non-nullable
+equivalents, so a `CREATE TABLE` with explicit non-nullable types is worth the effort.
+
+### Where a 30-minute load actually goes
+
+Parsing the JSON form of these records, not inserting them, is usually the real cost.
+Measured with the stdlib `json` module on 1.5 KB records: **185 MB/s, 117,000 records/s**,
+so 50M records (79 GB of JSON) is 7.1 minutes just to parse — before building Python
+objects, converting to a DataFrame, or inserting anything. Add those and 20-35 minutes
+is expected, which matches a "30 minutes for 50M records" experience. Going
+JSON -> parquet -> ClickHouse removes that step entirely.
+
 ## Findings
 
 1. **Server-side Parquet is only ~5% faster than an Arrow insert** (1.62M vs 1.54M
