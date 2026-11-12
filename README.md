@@ -221,6 +221,34 @@ objects, converting to a DataFrame, or inserting anything. Add those and 20-35 m
 is expected, which matches a "30 minutes for 50M records" experience. Going
 JSON -> parquet -> ClickHouse removes that step entirely.
 
+## CPU and RAM of the load itself (cgroup, not self-reported)
+
+Sampled from the ClickHouse container's cgroup v2 (`cpu.stat`, `memory.stat`) every
+50 ms. `anon` is the heap; page cache is reported separately because `file()` reads
+through it and it inflates the naive "container memory" number.
+
+| load | rows | seconds | rows/s | CPU avg | CPU-seconds | RAM anon peak | with page cache |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| flat, 1 INSERT `file()` | 50,000,000 | 37.9 | 1,317,703 | 2.4 cores | 90 | 2,530 MB | 8,166 MB |
+| flat, 4 concurrent INSERTs | 50,000,000 | 17.1 | 2,929,040 | 6.2 cores | 107 | 5,124 MB | 9,726 MB |
+| nested (Firebase shape), 4 concurrent | 2,000,000 | 3.4 | 588,000 | 6.6 cores | 22 | 6,525 MB | — |
+
+Rows were verified with `count()` and `sum(session_ms)` on both flat runs (identical),
+so the faster run is not a partial load.
+
+Three things follow from this:
+
+1. **CPU work is constant, parallelism only redistributes it.** 90 vs 107 CPU-seconds
+   for the same 50M rows, while wall clock halves. A 5-minute budget for 50M rows needs
+   about 0.3 cores on average; the limit is never CPU on this machine.
+2. **RAM scales with concurrent streams, not with total rows.** One stream peaks at
+   2.5 GB of heap, four streams at 5.1 GB. Chunked client-side writes hold 1.1 GB flat
+   at 50M rows (measured earlier).
+3. **Nested nullable columns are memory-hungry.** 2M rows of `Array(Tuple(Nullable ...))`
+   already peak at 6.5 GB with four streams, because every key and value arrives as
+   `Nullable`. Capping `max_threads` and the number of concurrent inserts is the
+   cheapest way to bound it.
+
 ## Findings
 
 1. **Server-side Parquet is only ~5% faster than an Arrow insert** (1.62M vs 1.54M

@@ -31,6 +31,7 @@ def main():
     ap.add_argument("--rows", type=int, default=5_000_000)
     ap.add_argument("--chunk", type=int, default=200_000)
     ap.add_argument("--file", default="/data/big.parquet")
+    ap.add_argument("--table", default="bench.events")
     a = ap.parse_args()
 
     client = clickhouse_connect.get_client(host=HOST, port=8123, compress=False)
@@ -46,7 +47,7 @@ def main():
             t = t.append_column("is_revenue", pc.greater(t["revenue_cents"], 0))
             t = t.filter(pc.greater(t["session_ms"], 0))          # drop clock-skew rows
             t = t.drop_columns(["props"])                          # not needed downstream
-            client.insert_arrow("bench.events", t)
+            client.insert_arrow(a.table, t)
             kept += t.num_rows
             if kept >= a.rows:
                 break
@@ -59,7 +60,7 @@ def main():
         import pandas as pd, pyarrow.parquet as _pq
         t0 = time.perf_counter()
         df = _pq.read_table(a.file).to_pandas()
-        client.insert_df("bench.events", df)
+        client.insert_df(a.table, df)
         el = time.perf_counter() - t0
         print(json.dumps({"mode": a.mode, "rows": len(df), "seconds": round(el, 3),
                           "rows_per_s": round(len(df) / el), "peak_mb": peak_mb()}))
@@ -86,16 +87,16 @@ def main():
         if batch.num_rows > todo:
             batch = batch.slice(0, todo)
         if a.mode == "arrow":
-            client.insert_arrow("bench.events", batch)
+            client.insert_arrow(a.table, batch)
         elif a.mode == "pandas":
-            client.insert_df("bench.events", batch.to_pandas())
+            client.insert_df(a.table, batch.to_pandas())
         else:                      # naive: per-row objects, 10k at a time
             cols = batch.to_pydict()
             names = list(cols)
             step = 10_000
             for i in range(0, batch.num_rows, step):
                 block = [[cols[c][i + j] for c in names] for j in range(min(step, batch.num_rows - i))]
-                client.insert("bench.events", block, column_names=names)
+                client.insert(a.table, block, column_names=names)
         inserted += batch.num_rows
         todo -= batch.num_rows
     elapsed = time.perf_counter() - t0
