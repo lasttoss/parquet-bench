@@ -249,6 +249,43 @@ Three things follow from this:
    `Nullable`. Capping `max_threads` and the number of concurrent inserts is the
    cheapest way to bound it.
 
+## Three tuning questions, measured
+
+### Nullable vs non-nullable (nested schema, 2M rows, 4 streams)
+
+| table | seconds | cpu-seconds | RAM anon peak | on disk |
+|---|---:|---:|---:|---:|
+| all columns `Nullable` (what BigQuery export produces) | 2.89 | 19 | 6,702 MB | 357.42 MiB |
+| same columns non-nullable, written out by hand | 3.01 | 23 | 6,600 MB | 330.47 MiB |
+
+Rewriting the DDL without `Nullable` saved **8% of disk and nothing else**: no speed
+gain, no memory gain. The intuitive "Nullable is slower" claim did not reproduce at this
+scale, so declare the types for the smaller footprint, not for the throughput.
+
+### How many concurrent inserts (nested 2M rows, 8 physical cores / 16 threads)
+
+| streams | seconds | rows/s | CPU avg | cpu-seconds | RAM anon peak |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 6.53 | 306,279 | 2.4 cores | 15 | 3,271 MB |
+| 2 | 3.58 | 558,659 | 4.4 cores | 16 | 4,378 MB |
+| 4 | 2.50 | 800,000 | 7.1 cores | 18 | 6,569 MB |
+| 8 | 2.52 | 793,651 | 7.4 cores | 19 | 7,058 MB |
+
+Four streams is the knee: it already uses 7.1 of 8 physical cores. Going to 8 buys
+0.8% and costs 0.5 GB. CPU-seconds stay flat (15-19), so this is scheduling, not work.
+
+### Merge does not finish when INSERT returns (50M flat rows)
+
+```
+INSERT completes:            16.3 s
++3 s   parts=20  merges=3
++6 s   parts=10  merges=1
++21 s  parts=5   merges=0     <- settled
+final on disk: 1.41 GiB  (parquet was 1.18 GB)
+```
+Queries work throughout, but a load is not finished for ~21 more seconds. Reporting the
+INSERT time alone understates a backfill by roughly half.
+
 ## Findings
 
 1. **Server-side Parquet is only ~5% faster than an Arrow insert** (1.62M vs 1.54M
