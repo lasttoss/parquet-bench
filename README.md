@@ -160,6 +160,37 @@ Consequence for a backfill: 500M rows at 40-100 bytes/row compressed is 20-50 GB
 which is 40-100 minutes over this link and 2-5 minutes from a local disk. Streaming
 saves disk space, not wall-clock time, unless the network is fast.
 
+## Real data from local disk (what a backfill actually costs)
+
+Public datasets downloaded once, then loaded from disk with `INSERT … SELECT FROM file()`.
+Throughput is reported in MB/s because rows/s depends entirely on row width:
+
+| dataset | rows | parquet | B/row | streams | ORDER BY | seconds | rows/s | MB/s |
+|---|---:|---:|---:|---:|---|---:|---:|---:|
+| NYC TLC yellow taxi, 20 months | 64,698,405 | 1.10 GB | 17 | 1 | `tuple()` | 17.1 | 3,783,532 | 65 |
+| same | 64,698,405 | 1.10 GB | 17 | 4 | `tuple()` | 6.7 | 9,656,478 | 165 |
+| same | 64,698,405 | 1.10 GB | 17 | 4 | `(VendorID, tpep_pickup_datetime)` | 10.5 | 6,137,682 | 105 |
+| ClickHouse `hits`, 4 files | 4,000,000 | 740 MB | 185 | 1 | `tuple()` | 6.0 | 666,667 | 123 |
+| same | 4,000,000 | 740 MB | 185 | 4 | `tuple()` | 2.6 | 1,538,462 | 285 |
+
+Planning rule from these numbers, for 4 concurrent inserts with a real sorting key:
+**minutes ≈ gigabytes / 6.6** (105 MB/s). With `ORDER BY tuple()` divide by 10.
+
+| rows | at 17 B/row | at 50 B/row | at 100 B/row | at 185 B/row |
+|---|---:|---:|---:|---:|
+| 50M | 0.1 min | 0.4 min | 0.8 min | 1.4 min |
+| 500M | 1.3 min | 3.8 min | 7.6 min | 14.0 min |
+
+So 500M rows fits in 5 minutes when the parquet is under ~30 GB, which is what a
+50-60 B/row event schema produces. Wide rows (nested `event_params`) do not: a
+sorting key costs 1.6x on top, and the honest way to plan is to measure bytes/row on
+one sample file and divide.
+
+Caveats: files were in page cache (written minutes earlier), single node, no
+replication, background merges still running afterwards (`system.parts` showed 38
+active parts on the taxi table), and an in-memory filesystem or faster disk would move
+these numbers more than any ClickHouse setting here.
+
 ## Findings
 
 1. **Server-side Parquet is only ~5% faster than an Arrow insert** (1.62M vs 1.54M
