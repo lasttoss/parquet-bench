@@ -140,6 +140,26 @@ Notes taken from actually running this:
   same region removes that cost. Streaming was verified for correctness here, not
   for throughput: the public test object is ~1 KB, so no MB/s number is claimed.
 
+## Real-world parquet over the internet (public samples)
+
+Two public datasets were loaded straight from HTTPS into ClickHouse, no local copy
+(the same mechanism as reading from GCS):
+
+| source | parquet | rows | seconds | rows/s | MB/s |
+|---|---:|---:|---:|---:|---:|
+| `datasets.clickhouse.com/hits_compatible/athena_partitioned/hits_1.parquet` | 174 MB | 1,000,000 | 18.5 | 54,000 | 9.4 |
+| `.../trip-data/yellow_tripdata_2023-01.parquet` (NYC TLC) | 47.9 MB | 3,066,766 | 5.8 | 528,000 | 8.1 |
+| three monthly NYC files, 3 concurrent inserts | 143.7 MB | 9,605,971 | 17.2 | 559,000 | 8.4 |
+| raw `curl` of one NYC file, for reference | 47.9 MB | — | 4.9 | — | 9.8 |
+
+The link saturates at ~9 MB/s (~75 Mbit/s): three concurrent streams give 8.4 MB/s
+total, i.e. no scaling. Parallel loading only helps once the data is local, or when
+ClickHouse runs in the same cloud region as the bucket.
+
+Consequence for a backfill: 500M rows at 40-100 bytes/row compressed is 20-50 GB,
+which is 40-100 minutes over this link and 2-5 minutes from a local disk. Streaming
+saves disk space, not wall-clock time, unless the network is fast.
+
 ## Findings
 
 1. **Server-side Parquet is only ~5% faster than an Arrow insert** (1.62M vs 1.54M
