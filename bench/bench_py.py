@@ -26,13 +26,34 @@ def peak_mb():
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mode", choices=["arrow", "pandas", "naive", "pandas_full"], required=True)
+    ap.add_argument("--mode", choices=["arrow", "pandas", "naive", "pandas_full", "arrow_transform"],
+                    required=True)
     ap.add_argument("--rows", type=int, default=5_000_000)
     ap.add_argument("--chunk", type=int, default=200_000)
     ap.add_argument("--file", default="/data/big.parquet")
     a = ap.parse_args()
 
     client = clickhouse_connect.get_client(host=HOST, port=8123, compress=False)
+    if a.mode == "arrow_transform":
+        # the realistic ETL: read a batch, transform it with Arrow compute, insert it.
+        # Nothing is ever fully materialised, so memory is a function of batch size only.
+        import pyarrow as pa, pyarrow.compute as pc
+        t0 = time.perf_counter()
+        kept = 0
+        for batch in pq.ParquetFile(a.file).iter_batches(batch_size=a.chunk):
+            t = pa.Table.from_batches([batch])
+            t = t.append_column("event_hour", pc.hour(pc.cast(t["ts"].combine_chunks(), pa.timestamp("s"), safe=False)))
+            t = t.append_column("is_revenue", pc.greater(t["revenue_cents"], 0))
+            t = t.filter(pc.greater(t["session_ms"], 0))          # drop clock-skew rows
+            t = t.drop_columns(["props"])                          # not needed downstream
+            client.insert_arrow("bench.events", t)
+            kept += t.num_rows
+            if kept >= a.rows:
+                break
+        el = time.perf_counter() - t0
+        print(json.dumps({"mode": a.mode, "rows": kept, "seconds": round(el, 3),
+                          "rows_per_s": round(kept / el), "peak_mb": peak_mb()}))
+        return
     if a.mode == "pandas_full":
         # what a script does when nobody told it to chunk: the whole file as one DataFrame
         import pandas as pd, pyarrow.parquet as _pq

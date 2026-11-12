@@ -14,7 +14,9 @@ CREATE TABLE bench.events
     session_ms     UInt32,
     revenue_cents  UInt64,
     is_payer       UInt8,
-    props          String
+    props          String,
+    event_hour     UInt8,
+    is_revenue     Bool
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMMDD(ts)

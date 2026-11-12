@@ -76,6 +76,29 @@ one DataFrame would need roughly 73 GB. That matches the "72 GB of RAM" experien
 people report; it is a property of the script holding everything, not of Parquet and
 not of ClickHouse.
 
+## Batch size: where the "10k rows/s" belief comes from
+
+Measured on 2M rows (and 10k rows for the last row, because it is far too slow to
+run at scale), same table, same machine, only the batch size changing:
+
+| rows per INSERT | rows/s | note |
+|---:|---:|---|
+| 1 | 475 | one INSERT per row: 10,000 rows took 21s |
+| 1,000 | 368,141 | |
+| 10,000 | 1,163,980 | |
+| 100,000 | 1,507,603 | |
+| 1,000,000 | 1,543,072 | |
+| one `file()` call (5M) | 1,630,056 | no client-side batching at all |
+
+The "10,000–100,000" figure that circulates is a recommendation for **how many rows to
+put in one INSERT**, not a throughput ceiling. Throughput is bounded by the number of
+INSERT statements (each one creates a part that has to be merged later), not by the
+number of rows: 25 inserts of 200k rows created 17 active parts and ran at 1.5M rows/s,
+while 10,000 inserts of one row each ran at 475 rows/s.
+
+Relevant defaults measured on this build: `max_insert_block_size=1,048,449`,
+`max_partitions_per_insert_block=100`, `async_insert=0`.
+
 ## Findings
 
 1. **Server-side Parquet is only ~5% faster than an Arrow insert** (1.62M vs 1.54M
